@@ -1,0 +1,34 @@
+# Flujo de trabajo que ejecuta las pruebas automáticas con pytest.
+name: Pruebas
+
+# Ejecuta el workflow en cada push y pull request.
+on:
+  push:
+  pull_request:
+
+jobs:
+  pruebas:
+    # Define el sistema operativo para la ejecución de los tests.
+    runs-on: ubuntu-latest
+
+    steps:
+      # Comprueba el repositorio en el runner de GitHub Actions.
+      - name: Obtener código
+        uses: actions/checkout@v4
+
+      # Configura la versión de Python empleada en la ejecución.
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Instala las dependencias del proyecto y pytest para las pruebas.
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements_gui.txt
+          pip install pytest
+
+      # Ejecuta la suite de pruebas.
+      - name: Ejecutar pruebas
+        run: pytest

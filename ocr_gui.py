@@ -15,7 +15,7 @@
 # -----------------------------
 
 # Importa typing para anotar tipos de manera clara y mantenible.
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 # Importa os para operaciones de sistema como rutas y variables de entorno.
 import os
@@ -278,7 +278,8 @@ def merge_pdfs(pdf_paths: List[str], output_pdf: str) -> None:
 
 # Define una función para ejecutar OCR con OCRmyPDF si está disponible.
 def run_ocrmypdf_cli(input_pdf: str, output_pdf: str, lang: str, rotate: bool, deskew: bool,
-                     clean: bool, jobs: int, pages: List[int]) -> None:
+                     clean: bool, jobs: int, pages: List[int],
+                     log_callback: Optional[Callable[[str], None]] = None) -> None:
     """
     Ejecuta el proceso OCR mediante la utilidad de línea de comandos 'ocrmypdf'.
     :param input_pdf: Ruta al PDF de entrada (escaneado).
@@ -289,6 +290,7 @@ def run_ocrmypdf_cli(input_pdf: str, output_pdf: str, lang: str, rotate: bool, d
     :param clean: Si es True, aplica limpieza de fondo/ruido.
     :param jobs: Número de hilos para paralelizar.
     :param pages: Lista de páginas base-1 a procesar (vacío = todas).
+    :param log_callback: Callback opcional para emitir mensajes de advertencia.
     """
     # Asegura que 'ocrmypdf' está disponible en PATH.
     ensure(which("ocrmypdf") is not None, "ocrmypdf no está instalado o no está en PATH.")
@@ -311,7 +313,24 @@ def run_ocrmypdf_cli(input_pdf: str, output_pdf: str, lang: str, rotate: bool, d
     # Añade enderezado si procede.
     if deskew:
         cmd += ["--deskew"]
-    # Añade limpieza/optimización si procede.
+    # Verifica si se solicitó limpieza y está disponible la herramienta externa 'unpaper'.
+    if clean:
+        # Comprueba si 'unpaper' está accesible en PATH.
+        unpaper_path = which("unpaper")
+        # Si la herramienta no existe, emite advertencia y desactiva limpieza.
+        if unpaper_path is None:
+            # Construye el mensaje de advertencia para informar al usuario.
+            warning = ("La opción de limpieza requiere el binario 'unpaper'. "
+                       "Se omitirá la limpieza para evitar errores. Instala 'unpaper' "
+                       "o desmarca la casilla de limpieza.")
+            # Emite la advertencia mediante el callback de log si está disponible.
+            if log_callback:
+                log_callback(warning)
+            else:
+                print(warning)
+            # Desactiva la limpieza para continuar sin fallo.
+            clean = False
+    # Añade limpieza/optimización cuando está activada y disponible.
     if clean:
         cmd += ["--clean", "--remove-background"]
     # Añade paralelización si se indica.
@@ -403,7 +422,8 @@ class OCRWorker(QThread):
                     deskew=self.deskew,
                     clean=self.clean,
                     jobs=self.jobs,
-                    pages=pages
+                    pages=pages,
+                    log_callback=self.log_signal.emit
                 )
                 # Reporta progreso al 100%.
                 self.progress_signal.emit(100)
