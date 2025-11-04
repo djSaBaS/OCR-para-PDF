@@ -1,6 +1,9 @@
 # Importa typing para describir colecciones utilizadas en las pruebas unitarias.
 from typing import List, Optional
 
+# Importa io para simular streams de texto en procesos fingidos.
+import io
+
 # Importa pathlib para trabajar con rutas temporales generadas por pytest.
 from pathlib import Path
 
@@ -151,15 +154,21 @@ def test_run_ocrmypdf_cli_omite_limpieza_sin_unpaper(monkeypatch: pytest.MonkeyP
     # Prepara una lista para recopilar los mensajes de log enviados desde run_ocrmypdf_cli.
     logs: List[str] = []
 
-    # Define un sustituto de subprocess.run que capture el comando sin ejecutarlo.
-    def fake_run(cmd: List[str], check: bool) -> None:
-        # Registra cada elemento del comando para facilitar las aserciones posteriores.
-        captured_cmd.extend(cmd)
-        # Simula una ejecución correcta devolviendo None.
-        return None
+    # Define un sustituto de subprocess.Popen que capture el comando sin ejecutarlo.
+    class FakeProcess:
+        # Constructor que almacena el comando y prepara un stream vacío.
+        def __init__(self, cmd, stdout, stderr, text, bufsize, universal_newlines):
+            # Registra cada elemento del comando para comprobaciones posteriores.
+            captured_cmd.extend(cmd)
+            # Expone un stream sin contenido para iterar sin errores.
+            self.stdout = io.StringIO("")
 
-    # Reemplaza subprocess.run dentro del módulo con el sustituto controlado.
-    monkeypatch.setattr(ocr_gui.subprocess, "run", fake_run)
+        # Define wait para simular finalización correcta.
+        def wait(self) -> int:
+            return 0
+
+    # Reemplaza subprocess.Popen dentro del módulo con la clase simulada.
+    monkeypatch.setattr(ocr_gui.subprocess, "Popen", FakeProcess)
 
     # Define un sustituto de which que retorna rutas simuladas salvo para 'unpaper'.
     def fake_which(name: str) -> Optional[str]:
@@ -190,3 +199,57 @@ def test_run_ocrmypdf_cli_omite_limpieza_sin_unpaper(monkeypatch: pytest.MonkeyP
     assert "--remove-background" not in captured_cmd
     # Verifica que se registró un mensaje avisando de la ausencia de 'unpaper'.
     assert any("unpaper" in entry for entry in logs)
+
+
+# Define una prueba que verifica la propagación del progreso desde OCRmyPDF.
+def test_run_ocrmypdf_cli_reporta_progreso(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Comprueba que run_ocrmypdf_cli interpreta las líneas de progreso y emite porcentajes."""
+    # Prepara listas para capturar comando, logs y porcentaje de progreso.
+    captured_cmd: List[str] = []
+    logs: List[str] = []
+    progress: List[int] = []
+
+    # Genera un stream con líneas similares a las que emite OCRmyPDF.
+    sample_output = """    1: page 1 of 4\n    2: page 2 of 4\n    3: page 3 of 4\n    4: page 4 of 4\n"""
+
+    # Define un proceso simulado que produce el stream anterior.
+    class FakeProcess:
+        # Constructor que almacena el comando y ofrece el stream.
+        def __init__(self, cmd, stdout, stderr, text, bufsize, universal_newlines):
+            # Registra el comando para su inspección.
+            captured_cmd.extend(cmd)
+            # Usa StringIO para emular stdout textual línea a línea.
+            self.stdout = io.StringIO(sample_output)
+
+        # Define wait para indicar finalización correcta.
+        def wait(self) -> int:
+            return 0
+
+    # Sustituye subprocess.Popen por la clase simulada.
+    monkeypatch.setattr(ocr_gui.subprocess, "Popen", FakeProcess)
+
+    # Define un which simulado que declara disponibles todas las dependencias.
+    monkeypatch.setattr(ocr_gui, "which", lambda name: f"/usr/bin/{name}")
+
+    # Ejecuta la función capturando logs y progreso.
+    ocr_gui.run_ocrmypdf_cli(
+        input_pdf=str(tmp_path / "entrada.pdf"),
+        output_pdf=str(tmp_path / "salida.pdf"),
+        lang="spa",
+        rotate=False,
+        deskew=False,
+        clean=False,
+        jobs=1,
+        pages=[1, 2, 3, 4],
+        log_callback=lambda message: logs.append(message),
+        progress_callback=lambda value: progress.append(value)
+    )
+
+    # Asegura que el comando emitido contiene la ruta de entrada y salida esperada.
+    assert str(tmp_path / "entrada.pdf") in captured_cmd
+    assert str(tmp_path / "salida.pdf") in captured_cmd
+    # Comprueba que los logs incluyen las líneas del stream simulado.
+    assert any("page 3 of 4" in entry for entry in logs)
+    # Verifica que se recibió al menos un valor de progreso y que finaliza al 100%.
+    assert progress, "Se esperaba recibir actualizaciones de progreso"
+    assert progress[-1] == 100
