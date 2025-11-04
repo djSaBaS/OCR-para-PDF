@@ -279,7 +279,8 @@ def merge_pdfs(pdf_paths: List[str], output_pdf: str) -> None:
 # Define una función para ejecutar OCR con OCRmyPDF si está disponible.
 def run_ocrmypdf_cli(input_pdf: str, output_pdf: str, lang: str, rotate: bool, deskew: bool,
                      clean: bool, jobs: int, pages: List[int],
-                     log_callback: Optional[Callable[[str], None]] = None) -> None:
+                     log_callback: Optional[Callable[[str], None]] = None,
+                     progress_callback: Optional[Callable[[int], None]] = None) -> None:
     """
     Ejecuta el proceso OCR mediante la utilidad de línea de comandos 'ocrmypdf'.
     :param input_pdf: Ruta al PDF de entrada (escaneado).
@@ -341,8 +342,55 @@ def run_ocrmypdf_cli(input_pdf: str, output_pdf: str, lang: str, rotate: bool, d
         cmd += ["--pages", pages_to_ranges(pages)]
     # Añade rutas de entrada y salida al final.
     cmd += [input_pdf, output_pdf]
-    # Ejecuta el comando y espera a que termine.
-    subprocess.run(cmd, check=True)
+    # Determina si se deben capturar logs o progreso.
+    capture_streams = log_callback is not None or progress_callback is not None
+    # Si se capturan streams, procesa la salida línea a línea para informar progreso.
+    if capture_streams:
+        # Lanza OCRmyPDF con stdout y stderr combinados para analizarlos.
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
+        # Garantiza que stdout esté disponible antes de iterar.
+        assert process.stdout is not None
+        # Recorre cada línea emitida por la herramienta externa.
+        for raw_line in process.stdout:
+            # Elimina saltos de línea finales para mantener formato limpio.
+            line = raw_line.rstrip()
+            # Si existe callback de log, reenvía el mensaje a la interfaz.
+            if log_callback:
+                log_callback(line)
+            else:
+                print(line)
+            # Si hay callback de progreso, intenta extraer el porcentaje.
+            if progress_callback:
+                # Busca patrones "page X of Y" producidos por OCRmyPDF.
+                match = re.search(r"page\s+(\d+)\s+of\s+(\d+)", line, re.IGNORECASE)
+                # Cuando se detecta el patrón, calcula el progreso aproximado.
+                if match:
+                    # Convierte la página actual a entero seguro.
+                    current_page = int(match.group(1))
+                    # Convierte el total a entero mínimo 1 para evitar división por cero.
+                    total_pages = max(1, int(match.group(2)))
+                    # Calcula el porcentaje de avance respecto al total.
+                    percent = int(current_page * 100 / total_pages)
+                    # Emite el porcentaje a la interfaz.
+                    progress_callback(percent)
+        # Espera el fin del proceso para capturar el código de retorno.
+        retcode = process.wait()
+        # Lanza excepción estándar si hubo error.
+        if retcode != 0:
+            raise subprocess.CalledProcessError(retcode, cmd)
+        # Asegura que el progreso se marca al 100% al terminar.
+        if progress_callback:
+            progress_callback(100)
+    else:
+        # Si no se necesitan logs ni progreso, ejecuta el comando directamente.
+        subprocess.run(cmd, check=True)
 
 
 # Define una clase QThread para ejecutar el OCR en segundo plano y no bloquear la GUI.
@@ -423,10 +471,9 @@ class OCRWorker(QThread):
                     clean=self.clean,
                     jobs=self.jobs,
                     pages=pages,
-                    log_callback=self.log_signal.emit
+                    log_callback=self.log_signal.emit,
+                    progress_callback=self.progress_signal.emit
                 )
-                # Reporta progreso al 100%.
-                self.progress_signal.emit(100)
                 # Emite señal de finalización.
                 self.done_signal.emit(self.output_pdf)
                 # Finaliza el método.
@@ -481,6 +528,8 @@ class OCRWindow(QMainWindow):
         super().__init__()
         # Establece el título de la ventana de la aplicación.
         self.setWindowTitle("OCR PDF – GUI (PyQt)")
+        # Habilita el soporte de arrastrar y soltar archivos directamente sobre la ventana.
+        self.setAcceptDrops(True)
         # Crea el contenedor central tipo QWidget.
         central = QWidget(self)
         # Crea un layout vertical principal para apilar secciones.
@@ -741,6 +790,50 @@ class OCRWindow(QMainWindow):
         # Si hay ruta elegida, actualiza el campo de salida.
         if path:
             self.out_edit.setText(path)
+
+    # Define el comportamiento al arrastrar archivos sobre la ventana.
+    def dragEnterEvent(self, event) -> None:  # type: ignore[override]
+        """
+        Acepta arrastres que contengan archivos PDF locales para facilitar la selección.
+        """
+        # Comprueba que el evento tenga URLs de archivos.
+        if event.mimeData().hasUrls():
+            # Recorre cada URL asociada al arrastre.
+            for url in event.mimeData().urls():
+                # Valida que la URL sea un archivo local con extensión .pdf.
+                if url.isLocalFile() and url.toLocalFile().lower().endswith(".pdf"):
+                    # Acepta el arrastre y permite el drop posterior.
+                    event.acceptProposedAction()
+                    return
+        # Si no cumple criterios, rechaza el arrastre.
+        event.ignore()
+
+    # Define el comportamiento cuando se suelta un archivo sobre la ventana.
+    def dropEvent(self, event) -> None:  # type: ignore[override]
+        """
+        Procesa el archivo PDF soltado, rellenando la ruta de entrada y sugiriendo salida.
+        """
+        # Inicializa variable para almacenar la primera ruta válida.
+        selected_path: Optional[str] = None
+        # Recorre cada URL proporcionada en el evento.
+        for url in event.mimeData().urls():
+            # Solo acepta archivos locales con extensión .pdf.
+            if url.isLocalFile() and url.toLocalFile().lower().endswith(".pdf"):
+                selected_path = url.toLocalFile()
+                break
+        # Si se obtuvo una ruta válida, actualiza los campos.
+        if selected_path:
+            # Actualiza el campo de entrada con la ruta arrastrada.
+            self.in_edit.setText(selected_path)
+            # Si no había una salida definida, sugiere el nombre con sufijo _OCR.
+            if not self.out_edit.text().strip():
+                base, _ = os.path.splitext(selected_path)
+                self.out_edit.setText(base + "_OCR.pdf")
+            # Marca el evento como aceptado.
+            event.acceptProposedAction()
+        else:
+            # Si no se encontró un PDF válido, delega en el comportamiento por defecto.
+            event.ignore()
 
     # Define una función para mostrar el manual de usuario detallado en un mensaje modal.
     def show_manual(self) -> None:
